@@ -1,7 +1,11 @@
 import hashlib
 import datetime
+import json
+import uuid
+import os
 from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlmodel import Session, select
 from ktem.db.models import Tenant, TenantUser, TenantInvitation, engine
@@ -19,6 +23,7 @@ class AuthUser:
     tenant_name: str
     role: UserRole
     is_active: bool
+    session_id: Optional[str] = None
     
     @property
     def is_admin(self) -> bool:
@@ -44,6 +49,44 @@ class AuthUser:
 class TenantAuthService:
     """Tenant authentication and authorization service"""
     
+    # Session management
+    _sessions_dir = Path(".kotaemon_sessions")
+    _session_timeout_hours = 24
+    
+    @classmethod
+    def _ensure_sessions_dir(cls):
+        """Ensure sessions directory exists"""
+        cls._sessions_dir.mkdir(exist_ok=True)
+    
+    @classmethod
+    def _get_session_file(cls, session_id: str) -> Path:
+        """Get session file path"""
+        return cls._sessions_dir / f"{session_id}.json"
+    
+    @classmethod
+    def _cleanup_expired_sessions(cls):
+        """Clean up expired session files"""
+        if not cls._sessions_dir.exists():
+            return
+        
+        current_time = datetime.datetime.now()
+        
+        for session_file in cls._sessions_dir.glob("*.json"):
+            try:
+                with open(session_file, 'r') as f:
+                    session_data = json.load(f)
+                
+                expires_at = datetime.datetime.fromisoformat(session_data['expires_at'])
+                if current_time > expires_at:
+                    session_file.unlink()
+                    
+            except (json.JSONDecodeError, KeyError, ValueError, OSError):
+                # Invalid file, delete it
+                try:
+                    session_file.unlink()
+                except OSError:
+                    pass
+    
     @staticmethod
     def hash_password(password: str) -> str:
         """Hash password using SHA256"""
@@ -54,8 +97,8 @@ class TenantAuthService:
         """Verify password against hash"""
         return TenantAuthService.hash_password(password) == hashed
     
-    @staticmethod
-    def authenticate_user(username: str, password: str, tenant_domain: Optional[str] = None) -> Optional[AuthUser]:
+    @classmethod
+    def authenticate_user(cls, username: str, password: str, tenant_domain: Optional[str] = None) -> Optional[AuthUser]:
         """
         Authenticate user with tenant support
         
@@ -95,7 +138,7 @@ class TenantAuthService:
             user, tenant = result
             
             # Verify password
-            if not TenantAuthService.verify_password(password, user.password):
+            if not cls.verify_password(password, user.password):
                 return None
             
             # Update last login
@@ -103,7 +146,7 @@ class TenantAuthService:
             session.add(user)
             session.commit()
             
-            return AuthUser(
+            auth_user = AuthUser(
                 id=user.id,
                 username=user.username,
                 email=user.email,
@@ -112,6 +155,14 @@ class TenantAuthService:
                 role=user.role,
                 is_active=user.is_active
             )
+            
+            # Create session for authenticated user
+            session_id = cls.create_session(auth_user)
+            
+            # Store session ID in auth_user for retrieval
+            auth_user.session_id = session_id
+            
+            return auth_user
     
     @staticmethod
     def get_user_by_id(user_id: str) -> Optional[AuthUser]:
@@ -343,6 +394,78 @@ class TenantAuthService:
             session.commit()
             
             return user
+    
+    @classmethod
+    def create_session(cls, auth_user: AuthUser) -> str:
+        """Create a new session for authenticated user"""
+        cls._ensure_sessions_dir()
+        cls._cleanup_expired_sessions()
+        
+        session_id = str(uuid.uuid4())
+        session_data = {
+            "session_id": session_id,
+            "user_id": auth_user.id,
+            "username": auth_user.username,
+            "role": auth_user.role.value,
+            "tenant_id": auth_user.tenant_id,
+            "tenant_name": auth_user.tenant_name,
+            "created_at": datetime.datetime.now().isoformat(),
+            "expires_at": (datetime.datetime.now() + datetime.timedelta(hours=cls._session_timeout_hours)).isoformat()
+        }
+        
+        session_file = cls._get_session_file(session_id)
+        with open(session_file, 'w') as f:
+            json.dump(session_data, f, indent=2)
+        
+        return session_id
+    
+    @classmethod
+    def get_session(cls, session_id: str) -> Optional[Dict]:
+        """Get session data by session ID"""
+        if not session_id:
+            return None
+        
+        session_file = cls._get_session_file(session_id)
+        if not session_file.exists():
+            return None
+        
+        try:
+            with open(session_file, 'r') as f:
+                session_data = json.load(f)
+            
+            # Check if session is expired
+            expires_at = datetime.datetime.fromisoformat(session_data['expires_at'])
+            if datetime.datetime.now() > expires_at:
+                cls._delete_session(session_id)
+                return None
+            
+            return session_data
+        except (json.JSONDecodeError, KeyError, ValueError):
+            cls._delete_session(session_id)
+            return None
+    
+    @classmethod
+    def get_user_from_session(cls, session_id: str) -> Optional[str]:
+        """Get user ID from session"""
+        session_data = cls.get_session(session_id)
+        return session_data['user_id'] if session_data else None
+    
+    @classmethod
+    def delete_session(cls, session_id: str) -> bool:
+        """Delete a session (logout)"""
+        return cls._delete_session(session_id)
+    
+    @classmethod
+    def _delete_session(cls, session_id: str) -> bool:
+        """Internal method to delete a session file"""
+        session_file = cls._get_session_file(session_id)
+        if session_file.exists():
+            try:
+                session_file.unlink()
+                return True
+            except OSError:
+                return False
+        return False
 
 
 class TenantAuthMiddleware:

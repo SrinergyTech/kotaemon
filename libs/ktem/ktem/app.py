@@ -79,7 +79,14 @@ class BaseApp:
         self.default_settings.index.finalize()
         self.settings_state = gr.State(self.default_settings.flatten())
 
-        self.user_id = gr.State("default" if not self.f_user_management else None)
+        # Initialize user_id with session restoration
+        initial_user_id = "default" if not self.f_user_management else None
+        
+        # Try to restore session if user management is enabled
+        if self.f_user_management:
+            initial_user_id = self._restore_user_session()
+        
+        self.user_id = gr.State(initial_user_id)
 
     def initialize_indices(self):
         """Create the index manager, start indices, and register to app settings"""
@@ -248,6 +255,64 @@ class BaseApp:
         for value in self.__dict__.values():
             if isinstance(value, BasePage):
                 value.on_app_created()
+    
+    def _restore_user_session(self):
+        """Restore user session from stored sessions"""
+        try:
+            from theflow.settings import settings as flowsettings
+            KH_ENABLE_TENANT_SYSTEM = getattr(flowsettings, "KH_ENABLE_TENANT_SYSTEM", True)
+            
+            if not KH_ENABLE_TENANT_SYSTEM:
+                return None
+            
+            from ktem.services.tenant_auth import TenantAuthService
+            from pathlib import Path
+            import json
+            import datetime
+            
+            sessions_dir = Path(".kotaemon_sessions")
+            if not sessions_dir.exists():
+                return None
+            
+            # Find the most recent valid session
+            latest_session = None
+            latest_time = None
+            
+            for session_file in sessions_dir.glob("*.json"):
+                try:
+                    with open(session_file, 'r') as f:
+                        session_data = json.load(f)
+                    
+                    # Check if session is still valid
+                    expires_at = datetime.datetime.fromisoformat(session_data['expires_at'])
+                    if datetime.datetime.now() > expires_at:
+                        continue  # Skip expired sessions
+                    
+                    # Check if this is the most recent session
+                    created_at = datetime.datetime.fromisoformat(session_data['created_at'])
+                    if latest_time is None or created_at > latest_time:
+                        latest_time = created_at
+                        latest_session = session_data
+                        
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
+            
+            if latest_session:
+                # Validate the user still exists and is active
+                user_id = latest_session['user_id']
+                auth_user = TenantAuthService.get_user_by_id(user_id)
+                if auth_user and auth_user.is_active:
+                    print(f"🔄 Restored session for user: {auth_user.username}")
+                    return user_id
+                else:
+                    # User no longer valid, clean up session
+                    TenantAuthService.delete_session(latest_session['session_id'])
+            
+            return None
+            
+        except Exception as e:
+            print(f"⚠️ Error restoring session: {e}")
+            return None
 
 
 class BasePage:
