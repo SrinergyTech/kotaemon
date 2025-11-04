@@ -181,7 +181,7 @@ class UserManagement(BasePage):
     def on_register_events(self):
         self.btn_new.click(
             self.create_user,
-            inputs=[self.usn_new, self.pwd_new, self.pwd_cnf_new],
+            inputs=[self.usn_new, self.pwd_new, self.pwd_cnf_new, self._app.user_id],
             outputs=[self.usn_new, self.pwd_new, self.pwd_cnf_new],
         ).then(
             self.list_users,
@@ -283,7 +283,7 @@ class UserManagement(BasePage):
             },
         )
 
-    def create_user(self, usn, pwd, pwd_cnf):
+    def create_user(self, usn, pwd, pwd_cnf, current_user_id=None):
         errors = validate_username(usn)
         if errors:
             gr.Warning(errors)
@@ -295,48 +295,140 @@ class UserManagement(BasePage):
             gr.Warning(errors)
             return usn, pwd, pwd_cnf
 
-        with Session(engine) as session:
-            statement = select(User).where(User.username_lower == usn.lower())
-            result = session.exec(statement).all()
-            if result:
-                gr.Warning(f'Username "{usn}" already exists')
-                return
+        # Check if tenant system is enabled
+        from theflow.settings import settings as flowsettings
+        KH_ENABLE_TENANT_SYSTEM = getattr(flowsettings, "KH_ENABLE_TENANT_SYSTEM", True)
+        
+        if KH_ENABLE_TENANT_SYSTEM:
+            # Use tenant system
+            from ktem.services.tenant_auth import TenantAuthService
+            from ktem.db.models import TenantUser
+            from ktem.db.tenant_models import UserRole
+            
+            # Get current user to determine tenant
+            if not current_user_id:
+                gr.Warning("Cannot create user: No current user context")
+                return usn, pwd, pwd_cnf
+                
+            current_user = TenantAuthService.get_user_by_id(current_user_id)
+            if not current_user or not current_user.is_admin:
+                gr.Warning("Only admins can create users")
+                return usn, pwd, pwd_cnf
+            
+            with Session(engine) as session:
+                # Check if username exists in this tenant
+                statement = select(TenantUser).where(
+                    TenantUser.username_lower == usn.lower(),
+                    TenantUser.tenant_id == current_user.tenant_id
+                )
+                result = session.exec(statement).all()
+                if result:
+                    gr.Warning(f'Username "{usn}" already exists in this tenant')
+                    return usn, pwd, pwd_cnf
 
-            hashed_password = hashlib.sha256(pwd.encode()).hexdigest()
-            user = User(
-                username=usn, username_lower=usn.lower(), password=hashed_password
-            )
-            session.add(user)
-            session.commit()
-            gr.Info(f'User "{usn}" created successfully')
+                # Create new tenant user
+                hashed_password = TenantAuthService.hash_password(pwd)
+                user = TenantUser(
+                    username=usn,
+                    username_lower=usn.lower(),
+                    email=f"{usn}@{current_user.tenant_name.lower().replace(' ', '')}.com",  # Generate default email
+                    password=hashed_password,
+                    tenant_id=current_user.tenant_id,
+                    role=UserRole.USER,  # Default to USER role
+                    is_active=True
+                )
+                session.add(user)
+                session.commit()
+                gr.Info(f'User "{usn}" created successfully in tenant "{current_user.tenant_name}"')
+        else:
+            # Legacy system
+            with Session(engine) as session:
+                statement = select(User).where(User.username_lower == usn.lower())
+                result = session.exec(statement).all()
+                if result:
+                    gr.Warning(f'Username "{usn}" already exists')
+                    return usn, pwd, pwd_cnf
+
+                hashed_password = hashlib.sha256(pwd.encode()).hexdigest()
+                user = User(
+                    username=usn, username_lower=usn.lower(), password=hashed_password
+                )
+                session.add(user)
+                session.commit()
+                gr.Info(f'User "{usn}" created successfully')
 
         return "", "", ""
 
     def list_users(self, user_id):
         if user_id is None:
             return [], pd.DataFrame.from_records(
-                [{"id": "-", "username": "-", "admin": "-"}]
+                [{"id": "-", "username": "-", "role": "-", "email": "-"}]
             )
 
-        with Session(engine) as session:
-            statement = select(User).where(User.id == user_id)
-            user = session.exec(statement).one()
-            if not user.admin:
+        # Check if tenant system is enabled
+        from theflow.settings import settings as flowsettings
+        KH_ENABLE_TENANT_SYSTEM = getattr(flowsettings, "KH_ENABLE_TENANT_SYSTEM", True)
+        
+        if KH_ENABLE_TENANT_SYSTEM:
+            # Use tenant system
+            from ktem.services.tenant_auth import TenantAuthService
+            from ktem.db.models import TenantUser, Tenant
+            
+            # Get current user from tenant system
+            current_user = TenantAuthService.get_user_by_id(user_id)
+            if not current_user or not current_user.is_admin:
                 return [], pd.DataFrame.from_records(
-                    [{"id": "-", "username": "-", "admin": "-"}]
+                    [{"id": "-", "username": "-", "role": "-", "email": "-"}]
                 )
+            
+            # Get all users from the same tenant
+            with Session(engine) as session:
+                statement = select(TenantUser).where(TenantUser.tenant_id == current_user.tenant_id)
+                tenant_users = session.exec(statement).all()
+                
+                results = [
+                    {
+                        "id": user.id, 
+                        "username": user.username, 
+                        "role": user.role.value.replace('_', ' ').title(),
+                        "email": user.email,
+                        "active": "Yes" if user.is_active else "No"
+                    }
+                    for user in tenant_users
+                ]
+                
+                if results:
+                    user_list = pd.DataFrame.from_records(results)
+                else:
+                    user_list = pd.DataFrame.from_records(
+                        [{"id": "-", "username": "-", "role": "-", "email": "-", "active": "-"}]
+                    )
+        else:
+            # Legacy system
+            with Session(engine) as session:
+                statement = select(User).where(User.id == user_id)
+                try:
+                    user = session.exec(statement).one()
+                    if not user.admin:
+                        return [], pd.DataFrame.from_records(
+                            [{"id": "-", "username": "-", "role": "-", "email": "-"}]
+                        )
 
-            statement = select(User)
-            results = [
-                {"id": user.id, "username": user.username, "admin": user.admin}
-                for user in session.exec(statement).all()
-            ]
-            if results:
-                user_list = pd.DataFrame.from_records(results)
-            else:
-                user_list = pd.DataFrame.from_records(
-                    [{"id": "-", "username": "-", "admin": "-"}]
-                )
+                    statement = select(User)
+                    results = [
+                        {"id": user.id, "username": user.username, "role": "Admin" if user.admin else "User", "email": getattr(user, 'email', 'N/A')}
+                        for user in session.exec(statement).all()
+                    ]
+                    if results:
+                        user_list = pd.DataFrame.from_records(results)
+                    else:
+                        user_list = pd.DataFrame.from_records(
+                            [{"id": "-", "username": "-", "role": "-", "email": "-"}]
+                        )
+                except Exception:
+                    return [], pd.DataFrame.from_records(
+                        [{"id": "-", "username": "-", "role": "-", "email": "-"}]
+                    )
 
         return results, user_list
 
@@ -368,14 +460,49 @@ class UserManagement(BasePage):
             btn_delete_yes = gr.update(visible=False)
             btn_delete_no = gr.update(visible=False)
 
-            with Session(engine) as session:
-                statement = select(User).where(User.id == selected_user_id)
-                user = session.exec(statement).one()
-
-            usn_edit = gr.update(value=user.username)
-            pwd_edit = gr.update(value="")
-            pwd_cnf_edit = gr.update(value="")
-            admin_edit = gr.update(value=user.admin)
+            # Check if tenant system is enabled
+            from theflow.settings import settings as flowsettings
+            KH_ENABLE_TENANT_SYSTEM = getattr(flowsettings, "KH_ENABLE_TENANT_SYSTEM", True)
+            
+            if KH_ENABLE_TENANT_SYSTEM:
+                # Use tenant system
+                from ktem.db.models import TenantUser
+                with Session(engine) as session:
+                    statement = select(TenantUser).where(TenantUser.id == selected_user_id)
+                    try:
+                        user = session.exec(statement).first()
+                        if user:
+                            usn_edit = gr.update(value=user.username)
+                            pwd_edit = gr.update(value="")
+                            pwd_cnf_edit = gr.update(value="")
+                            admin_edit = gr.update(value=(user.role.value != "user"))
+                        else:
+                            usn_edit = gr.update(value="User not found")
+                            pwd_edit = gr.update(value="")
+                            pwd_cnf_edit = gr.update(value="")
+                            admin_edit = gr.update(value=False)
+                    except Exception as e:
+                        print(f"Error loading user: {e}")
+                        usn_edit = gr.update(value="Error loading user")
+                        pwd_edit = gr.update(value="")
+                        pwd_cnf_edit = gr.update(value="")
+                        admin_edit = gr.update(value=False)
+            else:
+                # Legacy system
+                with Session(engine) as session:
+                    statement = select(User).where(User.id == selected_user_id)
+                    try:
+                        user = session.exec(statement).one()
+                        usn_edit = gr.update(value=user.username)
+                        pwd_edit = gr.update(value="")
+                        pwd_cnf_edit = gr.update(value="")
+                        admin_edit = gr.update(value=user.admin)
+                    except Exception as e:
+                        print(f"Error loading legacy user: {e}")
+                        usn_edit = gr.update(value="Error loading user")
+                        pwd_edit = gr.update(value="")
+                        pwd_cnf_edit = gr.update(value="")
+                        admin_edit = gr.update(value=False)
 
         return (
             _selected_panel,

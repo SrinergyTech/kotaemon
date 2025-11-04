@@ -56,9 +56,28 @@ class ResourcesTab(BasePage):
 
     def toggle_user_management(self, user_id):
         """Show/hide the user management, depending on the user's role"""
-        with Session(engine) as session:
-            user = session.exec(select(User).where(User.id == user_id)).first()
-            if user and user.admin:
-                return gr.update(visible=True)
-
+        if not user_id:
             return gr.update(visible=False)
+        
+        # Check if tenant system is enabled
+        from theflow.settings import settings as flowsettings
+        KH_ENABLE_TENANT_SYSTEM = getattr(flowsettings, "KH_ENABLE_TENANT_SYSTEM", True)
+        
+        if KH_ENABLE_TENANT_SYSTEM:
+            # Use tenant system
+            from ktem.services.tenant_auth import TenantAuthService
+            
+            auth_user = TenantAuthService.get_user_by_id(user_id)
+            if auth_user and auth_user.is_admin:
+                return gr.update(visible=True)
+        else:
+            # Legacy system
+            try:
+                with Session(engine) as session:
+                    user = session.exec(select(User).where(User.id == user_id)).first()
+                    if user and user.admin:
+                        return gr.update(visible=True)
+            except Exception:
+                pass
+
+        return gr.update(visible=False)

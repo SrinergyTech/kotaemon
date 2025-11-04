@@ -81,6 +81,45 @@ KH_FEATURE_USER_MANAGEMENT_ADMIN = str(
 KH_FEATURE_USER_MANAGEMENT_PASSWORD = str(
     config("KH_FEATURE_USER_MANAGEMENT_PASSWORD", default="admin")
 )
+
+# Tenant system default settings
+KH_DEFAULT_TENANT_NAME = str(
+    config("KH_DEFAULT_TENANT_NAME", default="Default Organization")
+)
+KH_DEFAULT_TENANT_DOMAIN = config("KH_DEFAULT_TENANT_DOMAIN", default=None)
+
+# Default Super Admin (full access including tenant management)
+KH_DEFAULT_SUPER_ADMIN = str(
+    config("KH_DEFAULT_SUPER_ADMIN", default="superadmin")
+)
+KH_DEFAULT_SUPER_ADMIN_EMAIL = str(
+    config("KH_DEFAULT_SUPER_ADMIN_EMAIL", default="superadmin@kotaemon.com")
+)
+KH_DEFAULT_SUPER_ADMIN_PASSWORD = str(
+    config("KH_DEFAULT_SUPER_ADMIN_PASSWORD", default="superadmin")
+)
+
+# Default Admin (chat, files, resources, settings, help)
+KH_DEFAULT_TENANT_ADMIN = str(
+    config("KH_DEFAULT_TENANT_ADMIN", default="admin")
+)
+KH_DEFAULT_TENANT_ADMIN_EMAIL = str(
+    config("KH_DEFAULT_TENANT_ADMIN_EMAIL", default="admin@kotaemon.com")
+)
+KH_DEFAULT_TENANT_ADMIN_PASSWORD = str(
+    config("KH_DEFAULT_TENANT_ADMIN_PASSWORD", default="admin")
+)
+
+# Default User (chat and files only)
+KH_DEFAULT_USER = str(
+    config("KH_DEFAULT_USER", default="user")
+)
+KH_DEFAULT_USER_EMAIL = str(
+    config("KH_DEFAULT_USER_EMAIL", default="user@kotaemon.com")
+)
+KH_DEFAULT_USER_PASSWORD = str(
+    config("KH_DEFAULT_USER_PASSWORD", default="user")
+)
 KH_ENABLE_ALEMBIC = False
 KH_DATABASE = f"sqlite:///{KH_USER_DATA_DIR / 'sql.db'}"
 KH_FILESTORAGE_PATH = str(KH_USER_DATA_DIR / "files")
